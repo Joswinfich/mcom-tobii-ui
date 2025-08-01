@@ -21,7 +21,7 @@
             top: 10px;
             left: 50%;
             transform: translateX(-50%);
-            color: #0f0;
+            color: #ff8c00; /* Orange main */
             font-size: 20px;
             text-align: center;
         }
@@ -30,7 +30,7 @@
             top: 40px;
             left: 50%;
             transform: translateX(-50%);
-            color: #0f0;
+            color: #ff8c00; /* Orange main */
             font-size: 24px;
             text-align: center;
         }
@@ -39,7 +39,7 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #f00;
+            color: #ff0000; /* Red secondary */
             font-size: 40px;
             display: none;
         }
@@ -47,7 +47,7 @@
             position: absolute;
             bottom: 10px;
             left: 10px;
-            color: #0f0;
+            color: #98ff98; /* Mint green accent */
             font-size: 14px;
         }
     </style>
@@ -69,7 +69,8 @@
         
         // Game state
         let score = 0;
-        let gameRunning = true;
+        let gameRunning = false; // Start with menu
+        let gameState = 'menu'; // 'menu' or 'playing'
         let eyeX = canvas.width / 2;
         let eyeY = canvas.height / 2;
         let level = 1;
@@ -109,10 +110,37 @@
         const playerMissiles = [];
         const enemyMissiles = [];
         const explosions = [];
+        let bonusPlane = null;
+        
+        // Damage flash system
+        let damageFlash = null;
+        const flashImage = new Image();
+        flashImage.src = '../assets/symbolflash.webp';
+        
+        // Background image
+        const backgroundImage = new Image();
+        backgroundImage.src = '../assets/background.png';
+        
+        // Title image
+        const titleImage = new Image();
+        titleImage.src = '../assets/lostglobalsupport.png';
         
         // Enemy missile spawn timer
         let enemySpawnTimer = 0;
         let enemySpawnDelay = 240; // frames between spawns - starts easier at level 1
+        
+        // Bonus plane timer
+        let planeSpawnTimer = 0;
+        let planeSpawnChance = 0.0003; // Much rarer spawn chance per frame
+        
+        // Round management
+        let roundActive = true;
+        let roundEndTimer = 0;
+        let missilesThisRound = 0;
+        let maxMissilesPerRound = 10 + (level - 1) * 2; // More missiles at higher levels
+        
+        // Mouse cursor visibility
+        let mouseVisible = true;
         
         // Classes
         class PlayerMissile {
@@ -172,13 +200,26 @@
                             break;
                         }
                     }
+                    
+                    // Check if within explosion radius - auto-explode
+                    for (let explosion of explosions) {
+                        const dx = this.x - explosion.x;
+                        const dy = this.y - explosion.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        if (distance < explosion.radius) {
+                            this.exploded = true;
+                            this.showTarget = false;
+                            explosions.push(new Explosion(this.x, this.y, 40));
+                            break;
+                        }
+                    }
                 }
             }
             
             draw() {
                 if (!this.exploded) {
                     // Draw missile trail
-                    ctx.strokeStyle = '#0ff';
+                    ctx.strokeStyle = '#98ff98'; /* Mint green */
                     ctx.lineWidth = 2;
                     ctx.beginPath();
                     ctx.moveTo(this.startX, this.startY);
@@ -186,12 +227,12 @@
                     ctx.stroke();
                     
                     // Draw missile head
-                    ctx.fillStyle = '#fff';
+                    ctx.fillStyle = '#98ff98'; /* Mint green */
                     ctx.fillRect(this.x - 2, this.y - 2, 4, 4);
                     
                     // Draw pixelated X target
                     if (this.showTarget) {
-                        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+                        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)'; /* Red secondary */
                         const size = 3;
                         
                         // Draw X pattern
@@ -213,24 +254,37 @@
         }
         
         class EnemyMissile {
-            constructor() {
-                this.x = Math.random() * canvas.width;
-                this.y = 0;
-                // Target a random city or base
-                const targets = [...cities.filter(c => c.alive), ...bases.filter(b => b.alive)];
-                if (targets.length > 0) {
-                    const target = targets[Math.floor(Math.random() * targets.length)];
-                    this.targetX = target.x;
-                    this.targetY = target.y;
+            constructor(x = null, y = null, targetX = null, targetY = null, isSplit = false) {
+                this.x = x || Math.random() * canvas.width;
+                this.y = y || 0;
+                
+                // Target a random city or base if not specified
+                if (!targetX || !targetY) {
+                    const targets = [...cities.filter(c => c.alive), ...bases.filter(b => b.alive)];
+                    if (targets.length > 0) {
+                        const target = targets[Math.floor(Math.random() * targets.length)];
+                        this.targetX = target.x;
+                        this.targetY = target.y;
+                    } else {
+                        this.targetX = Math.random() * canvas.width;
+                        this.targetY = canvas.height - 20;
+                    }
                 } else {
-                    this.targetX = Math.random() * canvas.width;
-                    this.targetY = canvas.height - 20;
+                    this.targetX = targetX;
+                    this.targetY = targetY;
                 }
                 
                 // Speed increases with level
-                const baseSpeed = 1 + (level - 1) * 0.3;
-                this.speed = baseSpeed + Math.random() * 1.5;
+                const baseSpeed = 0.95 + (level - 1) * 0.28;
+                this.speed = baseSpeed + Math.random() * 1.4;
                 this.trail = [{x: this.x, y: this.y}];
+                this.destroyed = false;
+                this.fadeAlpha = 1.0;
+                
+                // Splitting properties
+                this.canSplit = !isSplit && Math.random() < 0.18 && level > 1; // 18% chance, only after level 1
+                this.hasSplit = false;
+                this.splitDistance = 0.25 + Math.random() * 0.15; // Split at 25-40% of the way down
                 
                 // Calculate direction
                 const dx = this.targetX - this.x;
@@ -241,21 +295,64 @@
             }
             
             update() {
-                this.x += this.vx;
-                this.y += this.vy;
+                if (!this.destroyed) {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    
+                    // Add to trail (keep full trail for screen-long lines)
+                    this.trail.push({x: this.x, y: this.y});
+                    
+                    // Check if should split
+                    if (this.canSplit && !this.hasSplit) {
+                        const totalDistance = Math.sqrt((this.targetX - this.trail[0].x) ** 2 + (this.targetY - this.trail[0].y) ** 2);
+                        const currentDistance = Math.sqrt((this.x - this.trail[0].x) ** 2 + (this.y - this.trail[0].y) ** 2);
+                        
+                        if (currentDistance / totalDistance > this.splitDistance) {
+                            this.hasSplit = true;
+                            this.destroyed = true; // Destroy parent missile
+                            
+                            // Create 4 split missiles
+                            const targets = [...cities.filter(c => c.alive), ...bases.filter(b => b.alive)];
+                            for (let i = 0; i < 4; i++) {
+                                let splitTargetX, splitTargetY;
+                                
+                                // Each split missile targets a different location
+                                if (targets.length > i) {
+                                    splitTargetX = targets[i].x + (Math.random() - 0.5) * 40;
+                                    splitTargetY = targets[i].y;
+                                } else {
+                                    // Spread out if not enough targets
+                                    const angle = (Math.PI / 6) * (i - 1.5); // Spread in a fan pattern
+                                    const distance = 200 + Math.random() * 100;
+                                    splitTargetX = this.x + Math.sin(angle) * distance;
+                                    splitTargetY = canvas.height - 20;
+                                }
+                                
+                                const splitMissile = new EnemyMissile(this.x, this.y, splitTargetX, splitTargetY, true);
+                                // Make split missiles slower
+                                splitMissile.speed *= 0.7;
+                                splitMissile.vx *= 0.7;
+                                splitMissile.vy *= 0.7;
+                                enemyMissiles.push(splitMissile);
+                            }
+                        }
+                    }
+                }
                 
-                // Add to trail
-                this.trail.push({x: this.x, y: this.y});
-                if (this.trail.length > 20) {
-                    this.trail.shift();
+                // If destroyed, fade out
+                if (this.destroyed) {
+                    this.fadeAlpha -= 0.02;
+                    return this.fadeAlpha <= 0;
                 }
                 
                 // Check if hit ground
                 if (this.y >= canvas.height - 20) {
+                    this.destroyed = true;
                     // Check if hit a city
                     cities.forEach(city => {
                         if (city.alive && Math.abs(this.x - city.x) < 20) {
                             city.hits--;
+                            triggerDamageFlash(); // Flash when city takes damage
                             explosions.push(new Explosion(city.x, city.y, 40));
                             if (city.hits <= 0) {
                                 city.alive = false;
@@ -267,6 +364,7 @@
                     bases.forEach(base => {
                         if (base.alive && Math.abs(this.x - base.x) < 30) {
                             base.hits--;
+                            triggerDamageFlash(); // Flash when base takes damage
                             explosions.push(new Explosion(base.x, base.y, 50));
                             if (base.hits <= 0) {
                                 base.alive = false;
@@ -274,7 +372,7 @@
                         }
                     });
                     
-                    return true; // Missile should be removed
+                    return false; // Don't remove yet, let it fade
                 }
                 
                 // Check collision with explosions
@@ -283,6 +381,8 @@
                     const dy = this.y - explosion.y;
                     const distance = Math.sqrt(dx * dx + dy * dy);
                     if (distance < explosion.radius) {
+                        this.destroyed = true;
+                        
                         score += 25;
                         missilesDestroyed++;
                         
@@ -296,7 +396,7 @@
                         }
                         
                         explosions.push(new Explosion(this.x, this.y, 40));
-                        return true; // Missile destroyed
+                        return false; // Don't remove yet, let it fade
                     }
                 }
                 
@@ -304,8 +404,8 @@
             }
             
             draw() {
-                // Draw trail
-                ctx.strokeStyle = '#f00';
+                // Draw full trail with fade effect
+                ctx.strokeStyle = `rgba(255, 0, 0, ${this.fadeAlpha})`; /* Red secondary */
                 ctx.lineWidth = 2;
                 ctx.beginPath();
                 for (let i = 0; i < this.trail.length; i++) {
@@ -317,9 +417,170 @@
                 }
                 ctx.stroke();
                 
-                // Draw missile head
-                ctx.fillStyle = '#ff0';
-                ctx.fillRect(this.x - 2, this.y - 2, 4, 4);
+                // Draw missile head if not destroyed
+                if (!this.destroyed) {
+                    // Splitting missiles are slightly larger and orange
+                    if (this.canSplit && !this.hasSplit) {
+                        ctx.fillStyle = '#ff8c00'; /* Orange main */
+                        ctx.fillRect(this.x - 3, this.y - 3, 6, 6);
+                    } else {
+                        ctx.fillStyle = '#ff8c00'; /* Orange main */
+                        ctx.fillRect(this.x - 2, this.y - 2, 4, 4);
+                    }
+                }
+            }
+        }
+        
+        class BonusPlane {
+            constructor() {
+                // Randomly start from left or right
+                this.direction = Math.random() < 0.5 ? 1 : -1;
+                this.x = this.direction > 0 ? -80 : canvas.width + 80;
+                this.y = 50 + Math.random() * 100; // Fly in upper part of screen
+                this.speed = 0.8 + Math.random() * 0.4; // Much slower
+                this.width = 48; // Bigger
+                this.height = 24; // Bigger
+                this.destroyed = false;
+                this.fadeAlpha = 1.0;
+                this.pointValue = 500; // Big points!
+                this.frameCount = 0;
+            }
+            
+            update() {
+                if (!this.destroyed) {
+                    this.x += this.speed * this.direction;
+                    this.frameCount++;
+                    
+                    // Check if off screen
+                    if (this.x < -100 || this.x > canvas.width + 100) {
+                        return true; // Remove plane
+                    }
+                    
+                    // Check collision with player missiles and explosions
+                    for (let i = playerMissiles.length - 1; i >= 0; i--) {
+                        const missile = playerMissiles[i];
+                        if (!missile.exploded && 
+                            missile.x > this.x - this.width/2 && 
+                            missile.x < this.x + this.width/2 && 
+                            missile.y > this.y - this.height/2 && 
+                            missile.y < this.y + this.height/2) {
+                            // Hit!
+                            this.destroyed = true;
+                            missile.exploded = true;
+                            missile.showTarget = false;
+                            score += this.pointValue;
+                            explosions.push(new Explosion(this.x, this.y, 80));
+                            
+                            // Show bonus score
+                            const scoreDiv = document.createElement('div');
+                            scoreDiv.textContent = `+${this.pointValue}`;
+                            scoreDiv.style.position = 'absolute';
+                            scoreDiv.style.left = this.x + 'px';
+                            scoreDiv.style.top = this.y + 'px';
+                            scoreDiv.style.color = '#98ff98'; /* Mint green accent */
+                            scoreDiv.style.fontSize = '24px';
+                            scoreDiv.style.fontWeight = 'bold';
+                            scoreDiv.style.transition = 'all 1s';
+                            scoreDiv.style.pointerEvents = 'none';
+                            document.body.appendChild(scoreDiv);
+                            
+                            // Animate score popup
+                            setTimeout(() => {
+                                scoreDiv.style.transform = 'translateY(-50px)';
+                                scoreDiv.style.opacity = '0';
+                            }, 10);
+                            
+                            setTimeout(() => {
+                                document.body.removeChild(scoreDiv);
+                            }, 1000);
+                            
+                            return false;
+                        }
+                    }
+                    
+                    // Check collision with explosions
+                    for (let explosion of explosions) {
+                        const dx = this.x - explosion.x;
+                        const dy = this.y - explosion.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        if (distance < explosion.radius) {
+                            this.destroyed = true;
+                            score += this.pointValue;
+                            explosions.push(new Explosion(this.x, this.y, 80));
+                            
+                            // Show bonus score
+                            const scoreDiv = document.createElement('div');
+                            scoreDiv.textContent = `+${this.pointValue}`;
+                            scoreDiv.style.position = 'absolute';
+                            scoreDiv.style.left = this.x + 'px';
+                            scoreDiv.style.top = this.y + 'px';
+                            scoreDiv.style.color = '#98ff98'; /* Mint green accent */
+                            scoreDiv.style.fontSize = '24px';
+                            scoreDiv.style.fontWeight = 'bold';
+                            scoreDiv.style.transition = 'all 1s';
+                            scoreDiv.style.pointerEvents = 'none';
+                            document.body.appendChild(scoreDiv);
+                            
+                            setTimeout(() => {
+                                scoreDiv.style.transform = 'translateY(-50px)';
+                                scoreDiv.style.opacity = '0';
+                            }, 10);
+                            
+                            setTimeout(() => {
+                                document.body.removeChild(scoreDiv);
+                            }, 1000);
+                            
+                            break;
+                        }
+                    }
+                } else {
+                    // Fade out when destroyed
+                    this.fadeAlpha -= 0.05;
+                    return this.fadeAlpha <= 0;
+                }
+                
+                return false;
+            }
+            
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = this.fadeAlpha;
+                
+                // Pixelated plane design
+                const px = 6; // bigger pixel size
+                const x = Math.floor(this.x);
+                const y = Math.floor(this.y);
+                
+                // Blinking lights
+                const blink = this.frameCount % 30 < 15;
+                
+                // Plane body (green)
+                ctx.fillStyle = '#00ff00';
+                // Main fuselage
+                ctx.fillRect(x - px*4, y - px, px*8, px*2);
+                
+                // Wings (darker green)
+                ctx.fillStyle = '#008000';
+                ctx.fillRect(x - px*3, y - px*2, px*6, px);
+                ctx.fillRect(x - px*5, y - px/2, px*10, px/2);
+                
+                // Cockpit (dark green)
+                ctx.fillStyle = '#004000';
+                ctx.fillRect(x + px*2, y - px*1.5, px*2, px*2);
+                
+                // Engine/details (black)
+                ctx.fillStyle = '#000';
+                ctx.fillRect(x - px*5, y - px/2, px, px);
+                ctx.fillRect(x + px*4, y - px/2, px, px);
+                
+                // Blinking white lights
+                if (blink) {
+                    ctx.fillStyle = '#fff';
+                    ctx.fillRect(x - px*4, y - px*2, px/2, px/2);
+                    ctx.fillRect(x + px*3.5, y - px*2, px/2, px/2);
+                }
+                
+                ctx.restore();
             }
         }
         
@@ -334,18 +595,19 @@
             
             update() {
                 if (this.growing) {
-                    this.radius += 2;
+                    this.radius += 1.8; // Moderate growth speed
                     if (this.radius >= this.maxRadius) {
                         this.growing = false;
                     }
                 } else {
-                    this.radius -= 1;
+                    this.radius -= 0.6; // Moderate shrinking speed
                 }
                 return this.radius > 0;
             }
             
             draw() {
-                ctx.fillStyle = `rgba(255, 255, 0, ${this.radius / this.maxRadius})`;
+                const alpha = (this.radius / this.maxRadius) * 0.6; // Max 60% opacity
+                ctx.fillStyle = `rgba(152, 255, 152, ${alpha})`; /* Mint green */
                 ctx.beginPath();
                 ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
                 ctx.fill();
@@ -357,30 +619,96 @@
             if (base.alive) {
                 // Color based on damage
                 if (base.hits === 3) {
-                    ctx.fillStyle = '#0f0';
+                    ctx.fillStyle = '#4169e1'; /* Blue */
                 } else if (base.hits === 2) {
-                    ctx.fillStyle = '#ff0';
+                    ctx.fillStyle = '#6495ed'; /* Light blue */
                 } else {
-                    ctx.fillStyle = '#f00';
+                    ctx.fillStyle = '#87ceeb'; /* Sky blue */
                 }
                 
-                // Pixelated base design
-                const size = 4; // pixel size
+                // Check if this is the middle base (index 1)
+                const isMiddleBase = base.x === canvas.width * 0.5;
                 
-                // Base platform
-                ctx.fillRect(base.x - size * 5, base.y - size, size * 10, size);
-                ctx.fillRect(base.x - size * 4, base.y - size * 2, size * 8, size);
-                
-                // Missile launcher
-                if (base.hits >= 3) {
-                    ctx.fillRect(base.x - size * 3, base.y - size * 3, size * 6, size);
-                    ctx.fillRect(base.x - size * 2, base.y - size * 4, size * 4, size);
-                    ctx.fillRect(base.x - size, base.y - size * 5, size * 2, size);
-                } else if (base.hits === 2) {
-                    ctx.fillRect(base.x - size * 2, base.y - size * 3, size * 4, size);
-                    ctx.fillRect(base.x - size, base.y - size * 4, size * 2, size);
+                if (isMiddleBase) {
+                    // Big pyramid (twice the size)
+                    const size = 4;
+                    
+                    // Base platform (much wider)
+                    ctx.fillRect(base.x - size * 12, base.y - size, size * 24, size);
+                    ctx.fillRect(base.x - size * 10, base.y - size * 2, size * 20, size);
+                    
+                    // Large pyramid layers
+                    if (base.hits >= 3) {
+                        ctx.fillRect(base.x - size * 8, base.y - size * 3, size * 16, size);
+                        ctx.fillRect(base.x - size * 7, base.y - size * 4, size * 14, size);
+                        ctx.fillRect(base.x - size * 6, base.y - size * 5, size * 12, size);
+                        ctx.fillRect(base.x - size * 5, base.y - size * 6, size * 10, size);
+                        ctx.fillRect(base.x - size * 4, base.y - size * 7, size * 8, size);
+                        ctx.fillRect(base.x - size * 3, base.y - size * 8, size * 6, size);
+                        ctx.fillRect(base.x - size * 2, base.y - size * 9, size * 4, size);
+                        ctx.fillRect(base.x - size, base.y - size * 10, size * 2, size);
+                        ctx.fillRect(base.x - size * 0.5, base.y - size * 11, size, size);
+                    } else if (base.hits === 2) {
+                        ctx.fillRect(base.x - size * 6, base.y - size * 3, size * 12, size);
+                        ctx.fillRect(base.x - size * 5, base.y - size * 4, size * 10, size);
+                        ctx.fillRect(base.x - size * 4, base.y - size * 5, size * 8, size);
+                        ctx.fillRect(base.x - size * 3, base.y - size * 6, size * 6, size);
+                        ctx.fillRect(base.x - size * 2, base.y - size * 7, size * 4, size);
+                        ctx.fillRect(base.x - size, base.y - size * 8, size * 2, size);
+                    } else {
+                        ctx.fillRect(base.x - size * 4, base.y - size * 3, size * 8, size);
+                        ctx.fillRect(base.x - size * 3, base.y - size * 4, size * 6, size);
+                        ctx.fillRect(base.x - size * 2, base.y - size * 5, size * 4, size);
+                        ctx.fillRect(base.x - size, base.y - size * 6, size * 2, size);
+                    }
+                    
+                    // Tower to the right (thicker and further)
+                    const towerColor = base.hits >= 2 ? '#4169e1' : '#87ceeb';
+                    ctx.fillStyle = towerColor;
+                    const towerX = base.x + size * 18;
+                    ctx.fillRect(towerX - size * 1.5, base.y - size, size * 3, size);
+                    if (base.hits >= 2) {
+                        ctx.fillRect(towerX - size * 1.5, base.y - size * 8, size * 3, size * 7);
+                        ctx.fillRect(towerX - size * 1.5, base.y - size * 9, size * 3, size);
+                    } else {
+                        ctx.fillRect(towerX - size * 1.5, base.y - size * 4, size * 3, size * 3);
+                    }
+                    
+                    // Lake to the left (lower and connecting)
+                    ctx.fillStyle = '#0066cc'; // Blue water
+                    const lakeX = base.x - size * 15;
+                    // Lake shape (oval-ish, lower position)
+                    ctx.fillRect(lakeX - size * 6, base.y + size * 2, size * 12, size * 2);
+                    ctx.fillRect(lakeX - size * 7, base.y + size * 1, size * 14, size);
+                    ctx.fillRect(lakeX - size * 5, base.y + size * 3, size * 10, size);
+                    
+                    // Connection to pyramid base
+                    ctx.fillRect(lakeX + size * 6, base.y, size * 6, size * 2);
+                    
+                    // Water ripple effects
+                    ctx.fillStyle = '#0080ff'; // Lighter blue
+                    ctx.fillRect(lakeX - size * 4, base.y + size * 2, size * 2, size * 0.5);
+                    ctx.fillRect(lakeX + size * 1, base.y + size * 1.5, size * 3, size * 0.5);
+                    
                 } else {
-                    ctx.fillRect(base.x - size, base.y - size * 3, size * 2, size);
+                    // Regular base design for side bases
+                    const size = 4; // pixel size
+                    
+                    // Base platform
+                    ctx.fillRect(base.x - size * 5, base.y - size, size * 10, size);
+                    ctx.fillRect(base.x - size * 4, base.y - size * 2, size * 8, size);
+                    
+                    // Missile launcher
+                    if (base.hits >= 3) {
+                        ctx.fillRect(base.x - size * 3, base.y - size * 3, size * 6, size);
+                        ctx.fillRect(base.x - size * 2, base.y - size * 4, size * 4, size);
+                        ctx.fillRect(base.x - size, base.y - size * 5, size * 2, size);
+                    } else if (base.hits === 2) {
+                        ctx.fillRect(base.x - size * 2, base.y - size * 3, size * 4, size);
+                        ctx.fillRect(base.x - size, base.y - size * 4, size * 2, size);
+                    } else {
+                        ctx.fillRect(base.x - size, base.y - size * 3, size * 2, size);
+                    }
                 }
             }
         }
@@ -389,11 +717,11 @@
             if (city.alive) {
                 // Color based on damage
                 if (city.hits === 3) {
-                    ctx.fillStyle = '#00f';
+                    ctx.fillStyle = '#4169e1'; /* Blue */
                 } else if (city.hits === 2) {
-                    ctx.fillStyle = '#808';
+                    ctx.fillStyle = '#6495ed'; /* Light blue */
                 } else {
-                    ctx.fillStyle = '#400';
+                    ctx.fillStyle = '#87ceeb'; /* Sky blue */
                 }
                 
                 // Draw based on damage level
@@ -414,12 +742,14 @@
         }
         
         function drawCrosshair() {
-            ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+            ctx.strokeStyle = 'rgba(152, 255, 152, 0.3)'; /* Mint green accent */
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.arc(eyeX, eyeY, 60, 0, Math.PI * 2);
             ctx.stroke();
         }
+        
+        
         
         
         function updateLevelDisplay() {
@@ -430,11 +760,180 @@
             document.getElementById('level').textContent = `Level ${level} ${stars}`;
         }
         
+        function regenerateBuildings() {
+            // Regenerate all cities
+            cities.forEach(city => {
+                if (city.hits < 3) {
+                    city.hits++;
+                    if (city.hits > 0 && !city.alive) {
+                        city.alive = true; // Revive destroyed cities with 1 hit
+                    }
+                }
+            });
+            
+            // Regenerate all bases
+            bases.forEach(base => {
+                if (base.hits < 3) {
+                    base.hits++;
+                    if (base.hits > 0 && !base.alive) {
+                        base.alive = true; // Revive destroyed bases with 1 hit
+                    }
+                }
+            });
+            
+            // Visual feedback - brief green flash
+            const originalClearStyle = ctx.fillStyle;
+            ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        
+        function triggerDamageFlash() {
+            damageFlash = {
+                alpha: 1.0,
+                timer: 60 // Flash for 1 second at 60fps
+            };
+        }
+        
+        function updateDamageFlash() {
+            if (damageFlash) {
+                damageFlash.timer--;
+                damageFlash.alpha = damageFlash.timer / 60; // Fade out
+                
+                if (damageFlash.timer <= 0) {
+                    damageFlash = null;
+                } else {
+                    // Draw flash image in center of screen
+                    ctx.save();
+                    ctx.globalAlpha = damageFlash.alpha;
+                    const imageSize = 100;
+                    ctx.drawImage(flashImage, 
+                        canvas.width/2 - imageSize/2, 
+                        canvas.height/2 - imageSize/2, 
+                        imageSize, imageSize);
+                    ctx.restore();
+                }
+            }
+        }
+        
+        function runDemoGameplay() {
+            // Simplified demo - spawn occasional missiles and explosions
+            enemySpawnTimer++;
+            if (enemySpawnTimer >= 180) { // Slower spawning for demo
+                if (enemyMissiles.length < 3) { // Keep it light
+                    enemyMissiles.push(new EnemyMissile());
+                }
+                enemySpawnTimer = 0;
+            }
+            
+            // Auto-fire occasionally for demo
+            if (Math.random() < 0.01 && playerMissiles.length < 2) {
+                const randomBase = bases[Math.floor(Math.random() * 3)];
+                const randomTarget = {
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height * 0.5
+                };
+                playerMissiles.push(new PlayerMissile(randomBase.x, randomBase.y, randomTarget.x, randomTarget.y));
+            }
+            
+            // Update game objects for demo
+            for (let i = playerMissiles.length - 1; i >= 0; i--) {
+                playerMissiles[i].update();
+                if (playerMissiles[i].exploded) {
+                    playerMissiles.splice(i, 1);
+                }
+            }
+            
+            for (let i = enemyMissiles.length - 1; i >= 0; i--) {
+                if (enemyMissiles[i].update()) {
+                    enemyMissiles.splice(i, 1);
+                }
+            }
+            
+            for (let i = explosions.length - 1; i >= 0; i--) {
+                if (!explosions[i].update()) {
+                    explosions.splice(i, 1);
+                }
+            }
+            
+            // Draw demo gameplay
+            drawGameplay();
+        }
+        
+        function drawGameplay() {
+            // Draw ground
+            ctx.fillStyle = '#ff0000'; // Red ground
+            const leftmostX = Math.min(cities[0].x, bases[0].x) - 40;
+            const rightmostX = Math.max(cities[cities.length - 1].x, bases[bases.length - 1].x) + 40;
+            
+            ctx.fillRect(0, canvas.height - 30, canvas.width, 30);
+            
+            // Draw bases and cities
+            bases.forEach(drawBase);
+            cities.forEach(drawCity);
+            
+            // Draw game objects
+            playerMissiles.forEach(missile => missile.draw());
+            enemyMissiles.forEach(missile => missile.draw());
+            explosions.forEach(explosion => explosion.draw());
+        }
+        
+        function drawStartMenu() {
+            // Semi-transparent overlay
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw title image
+            if (titleImage.complete) {
+                const titleWidth = Math.min(canvas.width * 0.8, 600);
+                const titleHeight = (titleImage.height / titleImage.width) * titleWidth;
+                const titleX = (canvas.width - titleWidth) / 2;
+                const titleY = canvas.height * 0.2;
+                
+                ctx.drawImage(titleImage, titleX, titleY, titleWidth, titleHeight);
+            }
+            
+            // Draw menu text
+            ctx.fillStyle = '#98ff98'; // Mint green
+            ctx.font = '32px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('PRESS SPACE OR ENTER TO START', canvas.width/2, canvas.height * 0.7);
+            
+            ctx.font = '20px monospace';
+            ctx.fillText('ESC TO RETURN TO MENU', canvas.width/2, canvas.height * 0.8);
+            
+            ctx.font = '16px monospace';
+            ctx.fillText('B, N, M - Fire missiles from bases | Click to hide cursor | ESC to show cursor', canvas.width/2, canvas.height * 0.9);
+        }
+        
         // Input handling
         document.addEventListener('keydown', (e) => {
+            // Handle menu state
+            if (gameState === 'menu') {
+                if (e.key === ' ' || e.key === 'Enter') {
+                    startGame();
+                    return;
+                }
+                return;
+            }
+            
             if (!gameRunning && e.key.toLowerCase() === 'r') {
                 resetGame();
                 return;
+            }
+            
+            // Handle escape key to show mouse cursor or return to menu
+            if (e.key === 'Escape') {
+                if (gameState === 'playing') {
+                    gameState = 'menu';
+                    gameRunning = false;
+                    mouseVisible = true;
+                    canvas.style.cursor = 'default';
+                    return;
+                } else {
+                    mouseVisible = true;
+                    canvas.style.cursor = 'default';
+                    return;
+                }
             }
             
             if (!gameRunning) return;
@@ -465,11 +964,56 @@
             targetY = e.clientY;
         });
         
+        // Mouse click to hide cursor
+        document.addEventListener('click', (e) => {
+            mouseVisible = false;
+            canvas.style.cursor = 'none';
+        });
+        
         // If you have an eye tracker API, replace the mouse tracking above with:
         // window.addEventListener('eyetrack', (e) => {
         //     eyeX = e.detail.x;
         //     eyeY = e.detail.y;
         // });
+        
+        function startGame() {
+            gameState = 'playing';
+            gameRunning = true;
+            score = 0;
+            level = 1;
+            missilesDestroyed = 0;
+            document.getElementById('gameOver').style.display = 'none';
+            updateLevelDisplay();
+            
+            // Reset bases
+            bases.forEach(base => {
+                base.alive = true;
+                base.hits = 3;
+                base.cooldown = 0;
+            });
+            
+            // Reset cities
+            cities.forEach(city => {
+                city.alive = true;
+                city.hits = 3;
+            });
+            
+            // Clear arrays
+            playerMissiles.length = 0;
+            enemyMissiles.length = 0;
+            explosions.length = 0;
+            bonusPlane = null;
+            damageFlash = null;
+            
+            enemySpawnTimer = 0;
+            enemySpawnDelay = 240;
+            
+            // Reset round system
+            roundActive = true;
+            roundEndTimer = 0;
+            missilesThisRound = 0;
+            maxMissilesPerRound = 10;
+        }
         
         function resetGame() {
             score = 0;
@@ -496,24 +1040,72 @@
             playerMissiles.length = 0;
             enemyMissiles.length = 0;
             explosions.length = 0;
+            bonusPlane = null;
+            damageFlash = null;
             
             enemySpawnTimer = 0;
             enemySpawnDelay = 240;
+            
+            // Reset round system
+            roundActive = true;
+            roundEndTimer = 0;
+            missilesThisRound = 0;
+            maxMissilesPerRound = 10;
         }
         
         // Game loop
         function gameLoop() {
-            // Clear canvas
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            // Clear canvas completely (no trail effect)
+            ctx.fillStyle = 'rgba(0, 0, 0, 1)';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             
-            if (gameRunning) {
-                // Spawn enemy missiles
-                enemySpawnTimer++;
-                if (enemySpawnTimer >= enemySpawnDelay) {
-                    enemyMissiles.push(new EnemyMissile());
-                    enemySpawnTimer = 0;
-                    // Don't auto-adjust difficulty anymore - it's now level-based
+            // Draw background image with reduced brightness
+            if (backgroundImage.complete) {
+                ctx.save();
+                ctx.globalAlpha = 0.05; // Barely visible - 5% opacity
+                ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
+                ctx.restore();
+            }
+            
+            if (gameState === 'menu') {
+                // Demo gameplay in background
+                runDemoGameplay();
+                
+                // Draw menu overlay
+                drawStartMenu();
+            } else if (gameRunning) {
+                // Handle round system
+                if (roundActive) {
+                    // Spawn enemy missiles
+                    enemySpawnTimer++;
+                    if (enemySpawnTimer >= enemySpawnDelay && missilesThisRound < maxMissilesPerRound) {
+                        enemyMissiles.push(new EnemyMissile());
+                        missilesThisRound++;
+                        enemySpawnTimer = 0;
+                    }
+                    
+                    // Check if round should end
+                    if (missilesThisRound >= maxMissilesPerRound && enemyMissiles.length === 0) {
+                        roundActive = false;
+                        roundEndTimer = 120; // 2 second pause between rounds
+                        regenerateBuildings();
+                    }
+                } else {
+                    // Between rounds
+                    roundEndTimer--;
+                    
+                    // Display round complete message
+                    ctx.fillStyle = '#98ff98'; /* Mint green accent */
+                    ctx.font = '30px monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('ROUND COMPLETE - BUILDINGS REGENERATING', canvas.width/2, canvas.height/2);
+                    
+                    if (roundEndTimer <= 0) {
+                        // Start new round
+                        roundActive = true;
+                        missilesThisRound = 0;
+                        maxMissilesPerRound = 10 + (level - 1) * 2;
+                    }
                 }
                 
                 // Smooth mouse movement with easing
@@ -553,12 +1145,79 @@
                     }
                 }
                 
+                // Spawn bonus plane rarely
+                if (!bonusPlane && Math.random() < planeSpawnChance) {
+                    bonusPlane = new BonusPlane();
+                }
+                
+                // Update and draw bonus plane
+                if (bonusPlane) {
+                    if (bonusPlane.update()) {
+                        bonusPlane = null;
+                    } else {
+                        bonusPlane.draw();
+                    }
+                }
+                
                 // Update base cooldowns
                 bases.forEach(base => {
                     if (base.cooldown > 0) {
                         base.cooldown--;
                     }
                 });
+                
+                // Draw ground/sand
+                ctx.fillStyle = '#ff0000'; // Red ground
+                
+                // Find leftmost and rightmost building positions
+                const leftmostX = Math.min(cities[0].x, bases[0].x) - 40;
+                const rightmostX = Math.max(cities[cities.length - 1].x, bases[bases.length - 1].x) + 40;
+                
+                // Draw main ground
+                ctx.fillRect(0, canvas.height - 30, canvas.width, 30);
+                
+                // Draw left slope and plateau
+                ctx.beginPath();
+                ctx.moveTo(0, canvas.height - 30);
+                ctx.lineTo(leftmostX - 60, canvas.height - 30);
+                ctx.lineTo(leftmostX - 120, canvas.height - 80); // Slope up
+                ctx.lineTo(0, canvas.height - 80); // Plateau
+                ctx.lineTo(0, canvas.height - 30);
+                ctx.fill();
+                
+                // Draw right slope and plateau
+                ctx.beginPath();
+                ctx.moveTo(canvas.width, canvas.height - 30);
+                ctx.lineTo(rightmostX + 60, canvas.height - 30);
+                ctx.lineTo(rightmostX + 120, canvas.height - 80); // Slope up
+                ctx.lineTo(canvas.width, canvas.height - 80); // Plateau
+                ctx.lineTo(canvas.width, canvas.height - 30);
+                ctx.fill();
+                
+                // Draw darker ground texture lines (static, no random)
+                ctx.strokeStyle = '#cc0000'; // Darker red
+                ctx.lineWidth = 1;
+                for (let i = 0; i < canvas.width; i += 25) {
+                    const baseY = i < leftmostX - 60 ? 
+                        (i < leftmostX - 120 ? canvas.height - 80 : 
+                         canvas.height - 30 - ((leftmostX - 60 - i) / 60) * 50) :
+                        i > rightmostX + 60 ?
+                        (i > rightmostX + 120 ? canvas.height - 80 :
+                         canvas.height - 30 - ((i - rightmostX - 60) / 60) * 50) :
+                        canvas.height - 30;
+                    
+                    // Skip drawing lines in the lake area (middle base lake)
+                    const middleBaseX = canvas.width * 0.5;
+                    const lakeStartX = middleBaseX - 4 * 21; // lakeX - size * 7
+                    const lakeEndX = middleBaseX - 4 * 9;    // lakeX + size * 6 (connection area)
+                    
+                    if (i < lakeStartX || i > lakeEndX) {
+                        ctx.beginPath();
+                        ctx.moveTo(i, baseY);
+                        ctx.lineTo(i, canvas.height);
+                        ctx.stroke();
+                    }
+                }
                 
                 // Draw bases
                 bases.forEach(drawBase);
@@ -568,6 +1227,9 @@
                 
                 // Draw crosshair
                 drawCrosshair();
+                
+                // Update and draw damage flash
+                updateDamageFlash();
                 
                 // Update score
                 document.getElementById('score').textContent = `Score: ${score}`;
